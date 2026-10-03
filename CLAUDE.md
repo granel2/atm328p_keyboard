@@ -48,5 +48,6 @@
   (ведётся через Cowork). Клавиатура — ID 18.
 - Datasheet'ы: `E:\MEGAsync_R91\Mega_Git_R91\Cowork_MyStock\datasheets\`
   (txt-копии в `txt\` — искать grep'ом). Параметры брать оттуда, а не по памяти.
-  Есть `stm32f407.pdf`, `keypad_4x4_membrane.pdf`; datasheet ATmega328P отсутствует.
+  Есть `stm32f407.pdf`, `keypad_4x4_membrane.pdf`. Datasheet ATmega328P — в проекте:
+  `docs\atmega328p.PDF` (полный), `docs\atmega328p_.PDF`.
 - Проект основного модуля: `..\stm32f407_lan`.
