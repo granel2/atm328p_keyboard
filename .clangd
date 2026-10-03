@@ -1,0 +1,8 @@
+# Флаги avr-gcc, которых не знает clang
+CompileFlags:
+  Remove:
+    - -flto
+    - -fno-fat-lto-objects
+    - -fuse-linker-plugin
+    - -fpermissive
+    - -mrelax

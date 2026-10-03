@@ -1,0 +1,10 @@
+{
+    // clangd берёт флаги из compile_commands.json (pio run -t compiledb),
+    // а системные заголовки avr-libc - у самого avr-g++ из PlatformIO
+    "clangd.arguments": [
+        "--compile-commands-dir=${workspaceFolder}",
+        "--query-driver=**/avr-g*.exe"
+    ],
+    // чтобы IntelliSense от Microsoft не дублировал ошибки clangd
+    "C_Cpp.intelliSenseEngine": "disabled"
+}
