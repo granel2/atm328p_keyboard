@@ -11,6 +11,13 @@
 #include "config.h"
 #include "protocol.h"
 
+// KBD_UART_TEST (окружение uarttest): тест модуля без STM32 через UART PD1/PD0.
+// Печатает нажатия и каждый пакет так, как его прочитает STM32 (с CRC),
+// и сам подтверждает пакеты вместо STM32.
+#ifdef KBD_UART_TEST
+#define KBD_DEBUG
+#endif
+
 #ifdef KBD_DEBUG
 #define DBG(...) Serial.print(__VA_ARGS__)
 #define DBGLN(...) Serial.println(__VA_ARGS__)
@@ -298,14 +305,93 @@ static void scanKeys()
 
 // ---------------------------------------------------------------------------
 
+#ifdef KBD_UART_TEST
+static uint16_t readVccMv()
+{
+    ADMUX = _BV(REFS0) | 0x0E;      // опорное AVCC, вход - внутренний 1,1 В
+    delay(2);
+    ADCSRA |= _BV(ADSC);
+    while (ADCSRA & _BV(ADSC))
+        ;
+    uint16_t adc = ADC;
+    return adc ? (uint16_t)(1125300UL / adc) : 0;
+}
+
+static void printHex(uint8_t b)
+{
+    if (b < 0x10)
+        Serial.print('0');
+    Serial.print(b, HEX);
+    Serial.print(' ');
+}
+
+// Выводит пакет из головы очереди с CRC, как его прочитает STM32, и подтверждает
+static void uartTestPoll()
+{
+    if (!qCount)
+        return;
+
+    const Packet &p = queue[qHead];
+    uint8_t buf[KBD_MAX_PACKET];
+    buf[0] = p.type;
+    buf[1] = p.seq;
+    buf[2] = p.len;
+    memcpy(&buf[3], p.data, p.len);
+    uint8_t n = 3 + p.len;
+    buf[n] = kbd_crc8(kbd_crc8_update(0, (KBD_I2C_ADDR << 1) | 1), buf, n);
+
+    Serial.print(F("PKT "));
+    for (uint8_t i = 0; i <= n; i++)
+        printHex(buf[i]);
+
+    switch (p.type) {
+    case KBD_PKT_KEY:
+        Serial.print(F("| KEY "));
+        Serial.print((char)(p.data[0] & 0x7F));
+        Serial.print(p.data[0] & 0x80 ? F(" down") : F(" up"));
+        break;
+    case KBD_PKT_GROUP:
+        Serial.print(F("| GROUP reason="));
+        Serial.print(p.data[0]);
+        Serial.print(F(" \""));
+        for (uint8_t i = 1; i < p.len; i++)
+            Serial.print((char)p.data[i]);
+        Serial.print('"');
+        break;
+    case KBD_PKT_CANCEL:
+        Serial.print(F("| CANCEL reason="));
+        Serial.print(p.data[0]);
+        break;
+    }
+    Serial.println();
+
+    cli();
+    qHead = (qHead + 1) % QUEUE_LEN;
+    qCount--;
+    updateInt();
+    sei();
+}
+#endif
+
+// ---------------------------------------------------------------------------
+
 void setup()
 {
     MCUSR = 0;
     wdt_disable();
 
 #ifdef KBD_DEBUG
-    Serial.begin(115200);
+    Serial.begin(KBD_DEBUG_BAUD);
     DBGLN(F("kbd start"));
+#endif
+#ifdef KBD_UART_TEST
+    ADCSRA = _BV(ADEN) | _BV(ADPS2) | _BV(ADPS1) | _BV(ADPS0);
+    readVccMv();
+    Serial.print(F("UART test, F_CPU="));
+    Serial.print(F_CPU / 1000000UL);
+    Serial.print(F(" MHz, Vcc="));
+    Serial.print(readVccMv());
+    Serial.println(F(" mV. Packets are auto-ACKed."));
 #endif
 
     for (uint8_t i = 0; i < 4; i++) {
@@ -350,4 +436,8 @@ void loop()
         scanKeys();
         checkTimeout();
     }
+
+#ifdef KBD_UART_TEST
+    uartTestPoll();
+#endif
 }
