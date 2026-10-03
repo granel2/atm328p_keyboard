@@ -105,6 +105,8 @@
 
 ### Среда разработки
 
+- **Репозиторий:** https://github.com/granel2/atm328p_keyboard, ветка `main`.
+  В git не идут `.pio/`, `.cache/` (индекс clangd), `compile_commands.json`.
 - PlatformIO + Arduino (ядро MiniCore), `board = ATmega328P`.
 - Окружения: `ATmega328P` — рабочая прошивка; `clocktest` — тест частоты/питания
   (`src/clocktest.cpp`).
@@ -129,3 +131,4 @@
   Добавлен `clocktest`. Выяснено: программатор USBasp/PROGISP, чип ATmega328P подтверждён
   сигнатурой; на плате есть преобразователь 5→3,3 В, частота кварца неизвестна.
   Настроен clangd. Заведены `docs/DECISIONS.md`, `CLAUDE.md`, навык `kbd-i2c-project`.
+  Проект выложен в GitHub: granel2/atm328p_keyboard (ветка main).
