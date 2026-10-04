@@ -1,8 +1,7 @@
-// Клавиатура 4x4 на ATmega328P, I2C-ведомый для STM32F407.
-// Протокол - include/protocol.h, распиновка - include/config.h.
+// Клавиатура 4x4 на ATmega328P. По I2C сама (ведущий) передаёт пакеты в STM32F407.
+// Протокол - include/protocol.h, распиновка и логика ввода - include/config.h.
 //
-// Раскладка: цифры копятся в буфере, '#' отправляет буфер, '*' стирает его,
-// A..D уходят сразу одиночными пакетами.
+// Раскладка: цифры и A..D копятся в буфере, '#' отправляет буфер, '*' стирает его.
 
 #include <Arduino.h>
 #include <Wire.h>
@@ -12,8 +11,8 @@
 #include "protocol.h"
 
 // KBD_UART_TEST (окружение uarttest): тест модуля без STM32 через UART PD1/PD0.
-// Печатает нажатия и каждый пакет так, как его прочитает STM32 (с CRC),
-// и сам подтверждает пакеты вместо STM32.
+// Печатает нажатия и каждый пакет так, как он уйдёт в STM32 (с CRC и хвостом),
+// и считает его доставленным - I2C не используется.
 #ifdef KBD_UART_TEST
 #define KBD_DEBUG
 #endif
@@ -27,8 +26,7 @@
 #endif
 
 // ---------------------------------------------------------------------------
-// Очередь пакетов. Добавляет основной цикл, читает и удаляет обработчик I2C
-// (прерывание), поэтому добавление идёт с запретом прерываний.
+// Очередь пакетов (только основной цикл)
 
 struct Packet {
     uint8_t type;
@@ -38,173 +36,93 @@ struct Packet {
 };
 
 static Packet queue[QUEUE_LEN];
-static volatile uint8_t qHead;
-static volatile uint8_t qCount;
+static uint8_t qHead;
+static uint8_t qCount;
 static uint8_t nextSeq = 1;
-
-static volatile uint8_t statusFlags;
-static volatile bool statusRequested;
-
-struct Config {
-    uint8_t maxLen;
-    uint8_t endKey;
-    uint8_t clearKey;
-    uint8_t timeoutS;
-    uint8_t flags;
-};
-
-static Config cfg = {DEF_MAX_LEN, DEF_END_KEY, DEF_CLEAR_KEY, DEF_TIMEOUT_S, DEF_CFG_FLAGS};
-static Config cfgNew;
-static volatile bool cfgPending;
-static volatile bool resetPending;
-
-// Буфер ввода группы (только основной цикл)
-static char inBuf[KBD_INPUT_MAX];
-static uint8_t inLen;
-static uint32_t lastKeyMs;
-
-static void updateInt()
-{
-    // открытый сток: либо тянем к нулю, либо отпускаем линию
-    if (qCount)
-        INT_DDR |= _BV(INT_BIT);
-    else
-        INT_DDR &= ~_BV(INT_BIT);
-}
 
 static void queuePush(uint8_t type, const uint8_t *data, uint8_t len)
 {
-    uint8_t sreg = SREG;
-    cli();
+    // номер расходуется и при переполнении: STM32 увидит пропуск seq
+    uint8_t seq = nextSeq;
+    if (++nextSeq == 0)
+        nextSeq = 1;
+
     if (qCount >= QUEUE_LEN) {
-        statusFlags |= KBD_FLAG_OVERFLOW;
-    } else {
-        Packet &p = queue[(qHead + qCount) % QUEUE_LEN];
-        p.type = type;
-        p.seq = nextSeq;
-        p.len = len;
-        memcpy(p.data, data, len);
-        if (++nextSeq == 0)
-            nextSeq = 1;
-        qCount++;
-        updateInt();
+        DBG(F("queue full, lost seq ")); DBGLN(seq);
+        return;
     }
-    SREG = sreg;
+    Packet &p = queue[(qHead + qCount) % QUEUE_LEN];
+    p.type = type;
+    p.seq = seq;
+    p.len = len;
+    memcpy(p.data, data, len);
+    qCount++;
+}
+
+static void queueDrop()
+{
+    memset(&queue[qHead], 0, sizeof(queue[0]));   // не оставляем пароль в памяти
+    qHead = (qHead + 1) % QUEUE_LEN;
+    qCount--;
+}
+
+// Пакет из головы очереди в формате протокола: с CRC и хвостом
+static uint8_t buildFrame(uint8_t *buf)
+{
+    const Packet &p = queue[qHead];
+    buf[0] = p.type;
+    buf[1] = p.seq;
+    buf[2] = p.len;
+    memcpy(&buf[3], p.data, p.len);
+    uint8_t n = 3 + p.len;
+    buf[n] = kbd_crc8(kbd_crc8_update(0, KBD_HOST_ADDR << 1), buf, n);
+    buf[n + 1] = KBD_TAIL;
+    return n + 2;
 }
 
 // ---------------------------------------------------------------------------
-// I2C-ведомый (вызывается из прерывания TWI)
+// Передача в STM32
 
-static void onRequest()
+#ifndef KBD_UART_TEST
+static uint32_t lastSendMs;
+static uint8_t sendFails;
+
+static void sendPoll()
 {
-    uint8_t buf[KBD_MAX_PACKET];
-    uint8_t n;
+    if (!qCount)
+        return;
+    if (sendFails && millis() - lastSendMs < SEND_RETRY_MS)
+        return;
 
-    if (statusRequested) {
-        buf[0] = KBD_PKT_STATUS;
-        buf[1] = 0;
-        buf[2] = 3;
-        buf[3] = statusFlags;
-        buf[4] = qCount;
-        buf[5] = FW_VERSION;
-        n = 6;
-    } else if (qCount == 0) {
-        buf[0] = KBD_PKT_NONE;
-        buf[1] = 0;
-        buf[2] = 0;
-        n = 3;
-    } else {
-        const Packet &p = queue[qHead];
-        buf[0] = p.type;
-        buf[1] = p.seq;
-        buf[2] = p.len;
-        memcpy(&buf[3], p.data, p.len);
-        n = 3 + p.len;
+    uint8_t buf[KBD_MAX_FRAME];
+    uint8_t n = buildFrame(buf);
+    Wire.beginTransmission(KBD_HOST_ADDR);
+    Wire.write(buf, n);
+    uint8_t res = Wire.endTransmission();   // 0 - хвост подтверждён = пакет принят
+    memset(buf, 0, sizeof(buf));
+    lastSendMs = millis();
+
+    DBG(F("TX seq ")); DBG(queue[qHead].seq); DBG(F(" res ")); DBGLN(res);
+
+    if (res == 0) {
+        queueDrop();
+        sendFails = 0;
+    } else if (res == 2) {
+        sendFails = 1;                      // STM32 не готов: ждём сколько угодно
+    } else if (++sendFails > SEND_MAX_FAILS) {
+        DBG(F("dropped seq ")); DBGLN(queue[qHead].seq);
+        queueDrop();                        // 3 - CRC не сошлась, 4/5 - ошибка шины
+        sendFails = 0;
     }
-
-    uint8_t crc = kbd_crc8_update(0, (KBD_I2C_ADDR << 1) | 1);
-    buf[n] = kbd_crc8(crc, buf, n);
-    Wire.write(buf, n + 1);
 }
-
-static void onReceive(int count)
-{
-    uint8_t buf[8];
-    uint8_t n = 0;
-
-    while (Wire.available()) {
-        uint8_t b = Wire.read();
-        if (n < sizeof(buf))
-            buf[n] = b;
-        n++;
-    }
-    if (n < 2 || n > sizeof(buf)) {
-        statusFlags |= KBD_FLAG_BAD_CMD;
-        return;
-    }
-
-    uint8_t crc = kbd_crc8_update(0, KBD_I2C_ADDR << 1);
-    if (kbd_crc8(crc, buf, n - 1) != buf[n - 1]) {
-        statusFlags |= KBD_FLAG_CRC_ERR;
-        return;
-    }
-
-    uint8_t argc = n - 2;   // без кода команды и CRC
-    const uint8_t *arg = &buf[1];
-
-    switch (buf[0]) {
-    case KBD_CMD_ACK:
-        if (argc != 1)
-            break;
-        // если номер не совпал (повторный ACK), просто ничего не удаляем
-        if (qCount && queue[qHead].seq == arg[0]) {
-            qHead = (qHead + 1) % QUEUE_LEN;
-            qCount--;
-            updateInt();
-        }
-        statusRequested = false;
-        return;
-
-    case KBD_CMD_CONFIG:
-        if (argc != 5 || arg[0] < 1 || arg[0] > KBD_INPUT_MAX)
-            break;
-        cfgNew.maxLen = arg[0];
-        cfgNew.endKey = arg[1];
-        cfgNew.clearKey = arg[2];
-        cfgNew.timeoutS = arg[3];
-        cfgNew.flags = arg[4];
-        cfgPending = true;
-        statusRequested = false;
-        return;
-
-    case KBD_CMD_STATUS:
-        if (argc != 0)
-            break;
-        statusRequested = true;
-        return;
-
-    case KBD_CMD_CLEAR_FLAGS:
-        if (argc != 0)
-            break;
-        statusFlags = 0;
-        statusRequested = false;
-        return;
-
-    case KBD_CMD_RESET:
-        if (argc != 0)
-            break;
-        qHead = 0;
-        qCount = 0;
-        updateInt();
-        resetPending = true;
-        statusRequested = false;
-        return;
-    }
-    statusFlags |= KBD_FLAG_BAD_CMD;
-}
+#endif
 
 // ---------------------------------------------------------------------------
 // Ввод
+
+static char inBuf[KBD_INPUT_MAX];
+static uint8_t inLen;
+static uint32_t lastKeyMs;
 
 static void clearInput()
 {
@@ -234,20 +152,20 @@ static void onKey(char k, bool pressed)
 {
     DBG(pressed ? F("down ") : F("up   ")); DBGLN(k);
 
-    if ((uint8_t)k == cfg.endKey) {
+    if (k == END_KEY) {
         if (pressed)
             sendGroup(KBD_END_ENTER);
-    } else if ((uint8_t)k == cfg.clearKey) {
+    } else if (k == CLEAR_KEY) {
         if (pressed)
             sendCancel(KBD_END_CLEAR);
-    } else if (k >= '0' && k <= '9') {
+    } else if ((k >= '0' && k <= '9') || (k >= 'A' && k <= 'D' && !LETTERS_KEY)) {
         if (pressed) {
             inBuf[inLen++] = k;
             lastKeyMs = millis();
-            if (inLen >= cfg.maxLen)
+            if (inLen >= INPUT_MAX_LEN)
                 sendGroup(KBD_END_MAXLEN);
         }
-    } else if (pressed || (cfg.flags & KBD_CFG_KEY_RELEASE)) {
+    } else if (pressed || KEY_RELEASE) {
         uint8_t code = (uint8_t)k | (pressed ? 0x80 : 0);
         queuePush(KBD_PKT_KEY, &code, 1);
     }
@@ -255,11 +173,11 @@ static void onKey(char k, bool pressed)
 
 static void checkTimeout()
 {
-    if (inLen == 0 || cfg.timeoutS == 0)
+    if (inLen == 0 || INPUT_TIMEOUT_S == 0)
         return;
-    if (millis() - lastKeyMs < (uint32_t)cfg.timeoutS * 1000UL)
+    if (millis() - lastKeyMs < (uint32_t)INPUT_TIMEOUT_S * 1000UL)
         return;
-    if (cfg.flags & KBD_CFG_TIMEOUT_SEND)
+    if (TIMEOUT_SEND)
         sendGroup(KBD_END_TIMEOUT);
     else
         sendCancel(KBD_END_TIMEOUT);
@@ -325,23 +243,18 @@ static void printHex(uint8_t b)
     Serial.print(' ');
 }
 
-// Выводит пакет из головы очереди с CRC, как его прочитает STM32, и подтверждает
+// Выводит пакет из головы очереди так, как он уйдёт в STM32, и считает его доставленным
 static void uartTestPoll()
 {
     if (!qCount)
         return;
 
     const Packet &p = queue[qHead];
-    uint8_t buf[KBD_MAX_PACKET];
-    buf[0] = p.type;
-    buf[1] = p.seq;
-    buf[2] = p.len;
-    memcpy(&buf[3], p.data, p.len);
-    uint8_t n = 3 + p.len;
-    buf[n] = kbd_crc8(kbd_crc8_update(0, (KBD_I2C_ADDR << 1) | 1), buf, n);
+    uint8_t buf[KBD_MAX_FRAME];
+    uint8_t n = buildFrame(buf);
 
     Serial.print(F("PKT "));
-    for (uint8_t i = 0; i <= n; i++)
+    for (uint8_t i = 0; i < n; i++)
         printHex(buf[i]);
 
     switch (p.type) {
@@ -362,14 +275,17 @@ static void uartTestPoll()
         Serial.print(F("| CANCEL reason="));
         Serial.print(p.data[0]);
         break;
+    case KBD_PKT_START:
+        Serial.print(F("| START fw="));
+        Serial.print(p.data[0]);
+        Serial.print(F(" MCUSR=0x"));
+        Serial.print(p.data[1], HEX);
+        break;
     }
     Serial.println();
 
-    cli();
-    qHead = (qHead + 1) % QUEUE_LEN;
-    qCount--;
-    updateInt();
-    sei();
+    memset(buf, 0, sizeof(buf));
+    queueDrop();
 }
 #endif
 
@@ -377,6 +293,7 @@ static void uartTestPoll()
 
 void setup()
 {
+    uint8_t resetCause = MCUSR;     // 1 питание, 2 внешний сброс, 4 BOD, 8 watchdog
     MCUSR = 0;
     wdt_disable();
 
@@ -391,22 +308,26 @@ void setup()
     Serial.print(F_CPU / 1000000UL);
     Serial.print(F(" MHz, Vcc="));
     Serial.print(readVccMv());
-    Serial.println(F(" mV. Packets are auto-ACKed."));
+    Serial.println(F(" mV. Packets are not sent over I2C."));
 #endif
 
     for (uint8_t i = 0; i < 4; i++) {
         pinMode(ROW_PINS[i], INPUT);
         pinMode(COL_PINS[i], INPUT_PULLUP);
     }
-    INT_PORT &= ~_BV(INT_BIT);   // при включении на выход будет 0
-    INT_DDR &= ~_BV(INT_BIT);    // линия отпущена
 
-    Wire.begin(KBD_I2C_ADDR);
+#ifndef KBD_UART_TEST
+    Wire.begin();                   // ведущий
     // Wire включает внутренние подтяжки к 5 В - отключаем, шина подтянута снаружи
     digitalWrite(SDA, LOW);
     digitalWrite(SCL, LOW);
-    Wire.onReceive(onReceive);
-    Wire.onRequest(onRequest);
+    Wire.setClock(KBD_I2C_HZ);
+    Wire.setWireTimeout(I2C_TIMEOUT_US, true);
+#endif
+
+    // первым пакетом - сообщение о старте: STM32 сбрасывает проверку дублей seq
+    uint8_t start[2] = {FW_VERSION, resetCause};
+    queuePush(KBD_PKT_START, start, 2);
 
     wdt_enable(WDTO_500MS);
 }
@@ -417,19 +338,6 @@ void loop()
 
     wdt_reset();
 
-    if (cfgPending) {
-        cli();
-        cfg = cfgNew;
-        cfgPending = false;
-        sei();
-        if (inLen >= cfg.maxLen)
-            clearInput();
-    }
-    if (resetPending) {
-        resetPending = false;
-        clearInput();
-    }
-
     uint32_t now = millis();
     if (now - lastScan >= SCAN_PERIOD_MS) {
         lastScan = now;
@@ -439,5 +347,7 @@ void loop()
 
 #ifdef KBD_UART_TEST
     uartTestPoll();
+#else
+    sendPoll();
 #endif
 }

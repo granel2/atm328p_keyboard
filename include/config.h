@@ -4,7 +4,7 @@
 #include <Arduino.h>
 #include "protocol.h"
 
-#define FW_VERSION          0x01
+#define FW_VERSION          0x02    // 0x02 - ATmega ведущий, подтверждение хвостом
 
 // Мембранная клавиатура 4x4 (склад ID 18, datasheets/keypad_4x4_membrane.pdf).
 // Выводы шлейфа 1..8 слева направо, вид с лицевой стороны, шлейф вниз:
@@ -25,25 +25,30 @@ static const char KEYMAP[4][4] = {
     {'*', '0', '#', 'D'},
 };
 
-// Линия INT к STM32: D10 = PB2, открытый сток, активный низкий
-// (на SV5 линии нет - пока не подключается)
-#define INT_DDR             DDRB
-#define INT_PORT            PORTB
-#define INT_BIT             PB2
+// I2C: SDA = PC4 (A4), SCL = PC5 (A5). ATmega - ведущий, шину тактирует сама.
+// Внутренние подтяжки ATmega отключаются, подтяжки 4,7 кОм к 5 В ставятся снаружи.
+#define KBD_I2C_HZ          100000  // 100 кГц: запас по ёмкости шлейфа (см. DECISIONS.md)
+#define I2C_TIMEOUT_US      25000   // зависшая шина: Wire сбрасывает TWI и возвращает 5
 
-// I2C: SDA = PC4 (A4), SCL = PC5 (A5). Внутренние подтяжки ATmega отключаются,
-// подтяжки ставятся снаружи (см. вопрос уровней 5 В / 3,3 В).
+// Повторы отправки: STM32 не подтвердил адрес (не готов) - повторять бесконечно;
+// не подтвердил данные/хвост (CRC) или ошибка шины - после SEND_MAX_FAILS
+// подряд пакет отбрасывается (STM32 увидит пропуск seq), чтобы очередь не встала.
+#define SEND_RETRY_MS       10
+#define SEND_MAX_FAILS      10
 
-// Скорость отладочного UART: 38400 даёт ошибку 0,2 % и при 16, и при 8 МГц
-#define KBD_DEBUG_BAUD      38400
+// Скорость отладочного UART: при 16 МГц 1 000 000 делится точно (U2X, UBRR = 1), ошибка 0 %.
+// 921600 (как у STM32) при 16 МГц невозможна (+8,5 %), стандартные 57600/115200 дают +2,1 %.
+#define KBD_DEBUG_BAUD      1000000UL
 
 #define SCAN_PERIOD_MS      1       // период опроса матрицы
 #define DEBOUNCE_MS         10      // столько мс подряд состояние должно быть стабильным
 #define QUEUE_LEN           8       // пакетов в очереди
 
-// Значения по умолчанию (меняются командой KBD_CMD_CONFIG)
-#define DEF_MAX_LEN         KBD_INPUT_MAX
-#define DEF_END_KEY         '#'
-#define DEF_CLEAR_KEY       '*'
-#define DEF_TIMEOUT_S       10
-#define DEF_CFG_FLAGS       0       // по паузе ввод стирается, отпускания не шлются
+// Логика ввода (меняется перепрошивкой - команд настройки в протоколе нет)
+#define INPUT_MAX_LEN       KBD_INPUT_MAX   // после стольких символов группа уходит сама
+#define END_KEY             '#'
+#define CLEAR_KEY           '*'
+#define INPUT_TIMEOUT_S     10      // пауза ввода; 0 - без паузы
+#define TIMEOUT_SEND        0       // 1 - по паузе отправлять набранное, 0 - стирать (CANCEL)
+#define LETTERS_KEY         0       // 1 - A-D не в строке, а сразу пакетами KBD_PKT_KEY
+#define KEY_RELEASE         0       // 1 - для пакетов KBD_PKT_KEY слать и отпускание

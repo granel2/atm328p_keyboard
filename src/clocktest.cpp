@@ -2,7 +2,7 @@
 // Собирается только в окружении clocktest (см. platformio.ini).
 //
 // Прошивка считает, что кварц 16 МГц, и каждую "секунду" переключает
-// PB5 (D13, светодиод на большинстве плат) и PD2, а в UART печатает
+// PB5 (D13, светодиод на большинстве плат), а в UART печатает
 // счётчик и измеренное напряжение питания.
 //
 // Частота: засечь секундомером 30 переключений.
@@ -30,7 +30,6 @@ static uint16_t readVccMv()
 void setup()
 {
     pinMode(13, OUTPUT);
-    pinMode(2, OUTPUT);
     Serial.begin(9600);
     ADCSRA = _BV(ADEN) | _BV(ADPS2) | _BV(ADPS1) | _BV(ADPS0);
     readVccMv();                    // первое измерение после включения АЦП неточное
@@ -42,7 +41,6 @@ void loop()
     static uint16_t n;
 
     digitalWrite(13, n & 1);
-    digitalWrite(2, n & 1);
 
     Serial.print(F("t="));
     Serial.print(n);

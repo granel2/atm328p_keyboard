@@ -1,6 +1,7 @@
 # atm328p_keyboard
 
-Клавиатура 4×4 на ATmega328P — I²C-ведомый для основного модуля STM32F407.
+Клавиатура 4×4 на ATmega328P — по I²C сама (ведущий) передаёт пакеты основному модулю
+STM32F407 (ведомый `0x30`).
 Общаться с пользователем по-русски.
 
 ## Перед работой
@@ -26,7 +27,7 @@
 ## Сборка и прошивка
 
 - Сборка: `pio run` (рабочая) / `pio run -e clocktest` (тест частоты и питания) /
-  `pio run -e uarttest` (тест модуля через UART 38400 без STM32).
+  `pio run -e uarttest` (тест модуля через UART 1 000 000 без STM32).
   pio: `%USERPROFILE%\.platformio\penv\Scripts\pio.exe`.
 - Прошивка — пользователь шьёт сам через **PROGISP 1.72** (USBasp):
   `Load Flash` → `.pio\build\<env>\firmware.hex` → `Auto`.
