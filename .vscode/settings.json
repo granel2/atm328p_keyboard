@@ -6,5 +6,8 @@
         "--query-driver=**/avr-g*.exe"
     ],
     // чтобы IntelliSense от Microsoft не дублировал ошибки clangd
-    "C_Cpp.intelliSenseEngine": "disabled"
+    "C_Cpp.intelliSenseEngine": "disabled",
+    // системного Python нет; единственный - из PlatformIO (нужен для extra_scripts)
+    "python.defaultInterpreterPath": "${env:USERPROFILE}/.platformio/penv/Scripts/python.exe",
+    "python-envs.defaultEnvManager": "ms-python.python:system"
 }

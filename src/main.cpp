@@ -67,9 +67,9 @@ static void updateInt()
 {
     // открытый сток: либо тянем к нулю, либо отпускаем линию
     if (qCount)
-        DDRD |= _BV(INT_PIN);
+        INT_DDR |= _BV(INT_BIT);
     else
-        DDRD &= ~_BV(INT_PIN);
+        INT_DDR &= ~_BV(INT_BIT);
 }
 
 static void queuePush(uint8_t type, const uint8_t *data, uint8_t len)
@@ -398,8 +398,8 @@ void setup()
         pinMode(ROW_PINS[i], INPUT);
         pinMode(COL_PINS[i], INPUT_PULLUP);
     }
-    PORTD &= ~_BV(INT_PIN);   // при включении на выход будет 0
-    DDRD &= ~_BV(INT_PIN);    // линия отпущена
+    INT_PORT &= ~_BV(INT_BIT);   // при включении на выход будет 0
+    INT_DDR &= ~_BV(INT_BIT);    // линия отпущена
 
     Wire.begin(KBD_I2C_ADDR);
     // Wire включает внутренние подтяжки к 5 В - отключаем, шина подтянута снаружи
